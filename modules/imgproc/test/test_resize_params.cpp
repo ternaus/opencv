@@ -9,6 +9,51 @@
 
 namespace opencv_test { namespace {
 
+TEST(Imgproc_ResizeParams, AntialiasLinear)
+{
+    ResizeParams params(Size(3, 1));
+    params.antialias = true;
+    params.excludeOutside = true;
+
+    const Mat src = Mat_<uchar>({1, 5}, {255, 0, 255, 0, 0});
+    Mat dst;
+    resize(src, dst, params);
+    // Pillow 13.0.0 BILINEAR, including the renormalized left edge.
+    const Mat expected = Mat_<uchar>({1, 3}, {146, 142, 0});
+    EXPECT_EQ(0.0, cvtest::norm(expected, dst, NORM_INF));
+
+    params.excludeOutside = false;
+    resize(src, dst, params);
+    const Mat edgeReplicated = Mat_<uchar>({1, 3}, {159, 142, 0});
+    EXPECT_EQ(0.0, cvtest::norm(edgeReplicated, dst, NORM_INF));
+
+    const Mat impulse = Mat_<float>({1, 5}, {0, 0, 1, 0, 0});
+    resize(impulse, dst, params);
+    ASSERT_EQ(CV_32FC1, dst.type());
+    EXPECT_NEAR(5.0 / 9.0, dst.at<float>(0, 1), 1e-6);
+}
+
+TEST(Imgproc_ResizeParams, AntialiasLinearMixedScale)
+{
+    const Mat channel = Mat_<uchar>({2, 5}, {0, 30, 200, 55, 255, 255, 0, 63, 100, 0});
+    Mat src;
+    merge(std::vector<Mat>{channel, 255 - channel, channel}, src);
+    ResizeParams params(Size(3, 4));
+    params.antialias = true;
+    params.excludeOutside = true;
+    Mat dst;
+    resize(src, dst, params);
+    std::vector<Mat> channels;
+    split(dst, channels);
+    ASSERT_EQ(3u, channels.size());
+
+    // Pillow rounds the horizontal pass to uint8. This implementation rounds only at output.
+    const Mat expected = Mat_<uchar>({4, 3}, {13, 130, 169, 46, 112, 138, 113, 75, 75, 146, 57, 43});
+    EXPECT_LE(cvtest::norm(expected, channels[0], NORM_INF), 1.0);
+    EXPECT_LE(cvtest::norm(255 - expected, channels[1], NORM_INF), 1.0);
+    EXPECT_EQ(0.0, cvtest::norm(channels[0], channels[2], NORM_INF));
+}
+
 static Mat makeTestImage(int type, Size sz, int seed)
 {
     Mat img(sz, type);
@@ -355,7 +400,7 @@ TEST(Resize_Params, RejectsInvalidInputs)
         EXPECT_NO_THROW(resize(narrow, narrowDst, nearest)) << typeToString(type);
     }
 
-    ResizeParams antialias(Size(32, 32));
+    ResizeParams antialias(Size(32, 32), 0, 0, INTER_CUBIC);
     antialias.antialias = true;
     EXPECT_THROW(resize(src, dst, antialias), cv::Exception);
 

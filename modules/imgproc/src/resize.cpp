@@ -3193,8 +3193,9 @@ int resolveInterpolation(const ResizeParams& params, int depth)
 // Rejects what no table builder covers. Called once per resize(), before any plan is built.
 void checkResizeParams(const ResizeParams& params)
 {
-    if (params.antialias)
-        CV_Error(Error::StsNotImplemented, "ResizeParams::antialias is not implemented yet");
+    if (params.antialias &&
+        (params.interpolation != INTER_LINEAR || params.coordMode != ResizeCoord::PIXEL_CENTER))
+        CV_Error(Error::StsNotImplemented, "Antialiasing requires INTER_LINEAR with pixel-center coordinates");
     // The bit-exact kernels have no coordinate-mode parameter, so they only serve PIXEL_CENTER.
     if (params.coordMode != ResizeCoord::PIXEL_CENTER &&
         params.interpolation != INTER_NEAREST && params.interpolation != INTER_LINEAR &&
@@ -3215,6 +3216,90 @@ Size resolveDstSize(Size ssize, const ResizeParams& params)
     Size dsize(saturate_cast<int>(ssize.width*params.fx), saturate_cast<int>(ssize.height*params.fy));
     CV_Assert(!dsize.empty());
     return dsize;
+}
+
+struct TriangleTaps
+{
+    int first;
+    std::vector<double> weights;
+};
+
+std::vector<TriangleTaps> makeTriangleTaps(int sourceLength, int targetLength, bool excludeOutside)
+{
+    const double scale = double(sourceLength) / targetLength;
+    const double radius = std::max(1.0, scale);
+    const int lastSource = sourceLength - 1;
+    std::vector<TriangleTaps> table(targetLength);
+    for (int i = 0; i < targetLength; ++i)
+    {
+        const double center = (i + 0.5) * scale - 0.5;
+        const int64 start = static_cast<int64>(std::ceil(center - radius));
+        const int64 end = static_cast<int64>(std::floor(center + radius));
+        const int first = static_cast<int>(std::max<int64>(0, start));
+        const int last = static_cast<int>(std::min<int64>(lastSource, end));
+        TriangleTaps& taps = table[i];
+        taps.first = first;
+        taps.weights.resize(last - first + 1, 0.0);
+        double sum = 0;
+        for (int64 j = excludeOutside ? first : start; j <= (excludeOutside ? last : end); ++j)
+        {
+            const double weight = std::max(0.0, 1.0 - std::abs(j - center) / radius);
+            const int sourceIndex = static_cast<int>(std::min<int64>(last, std::max<int64>(first, j)));
+            taps.weights[sourceIndex - first] += weight;
+            sum += weight;
+        }
+        for (double& weight : taps.weights)
+            weight /= sum;
+    }
+    return table;
+}
+
+template<typename T>
+void resizeLinearAntialias(const Mat& src, Mat& dst, bool excludeOutside)
+{
+    const auto horizontal = makeTriangleTaps(src.cols, dst.cols, excludeOutside);
+    const auto vertical = makeTriangleTaps(src.rows, dst.rows, excludeOutside);
+    const int channels = src.channels();
+    const size_t rowSize = static_cast<size_t>(dst.cols) * channels;
+
+    parallel_for_(Range(0, dst.rows), [&](const Range& range)
+    {
+        AutoBuffer<double> row(rowSize), sum(rowSize);
+        int cachedSourceRow = -1;
+        for (int y = range.start; y < range.end; ++y)
+        {
+            std::fill_n(sum.data(), rowSize, 0.0);
+            const TriangleTaps& yTaps = vertical[y];
+            for (size_t ky = 0; ky < yTaps.weights.size(); ++ky)
+            {
+                const int sy = yTaps.first + static_cast<int>(ky);
+                if (sy != cachedSourceRow)
+                {
+                    const T* source = src.ptr<T>(sy);
+                    for (int x = 0; x < dst.cols; ++x)
+                    {
+                        const TriangleTaps& xTaps = horizontal[x];
+                        const size_t offset = static_cast<size_t>(x) * channels;
+                        const T* pixel = source + static_cast<size_t>(xTaps.first) * channels;
+                        std::fill_n(row.data() + offset, channels, 0.0);
+                        for (double weight : xTaps.weights)
+                        {
+                            for (int c = 0; c < channels; ++c)
+                                row[offset + c] += weight * pixel[c];
+                            pixel += channels;
+                        }
+                    }
+                    cachedSourceRow = sy;
+                }
+                const double weight = yTaps.weights[ky];
+                for (size_t x = 0; x < rowSize; ++x)
+                    sum[x] += weight * row[x];
+            }
+            T* dest = dst.ptr<T>(y);
+            for (size_t x = 0; x < rowSize; ++x)
+                dest[x] = saturate_cast<T>(sum[x]);
+        }
+    });
 }
 
 // dst/src per axis. A given dsize overrides fx/fy, as in classic cv::resize, except for the ONNX
@@ -4198,6 +4283,27 @@ void cv::resize( InputArray _src, OutputArray _dst, const ResizeParams& params )
     CV_INSTRUMENT_REGION();
 
     checkResizeParams(params);
+
+    if (params.antialias)
+    {
+        if (!_src.isMat() || _src.dims() != 2 || !_dst.isMat() ||
+            (_src.depth() != CV_8U && _src.depth() != CV_32F))
+            CV_Error(Error::StsNotImplemented, "Antialiasing supports 2D CV_8U and CV_32F Mat inputs and outputs");
+        const Mat src = _src.getMat();
+        const Size dsize = resolveDstSize(src.size(), params);
+        if (dsize.width >= src.cols && dsize.height >= src.rows)
+        {
+            cv::resize(src, _dst, dsize, 0, 0, INTER_LINEAR);
+            return;
+        }
+        _dst.create(dsize, src.type());
+        Mat dst = _dst.getMat();
+        if (src.depth() == CV_8U)
+            resizeLinearAntialias<uchar>(src, dst, params.excludeOutside);
+        else
+            resizeLinearAntialias<float>(src, dst, params.excludeOutside);
+        return;
+    }
 
     if (_src.isUMatVector())
     {

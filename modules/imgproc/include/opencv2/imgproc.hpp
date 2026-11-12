@@ -2186,11 +2186,12 @@ struct CV_EXPORTS_W_SIMPLE ResizeParams
     CV_PROP_RW float cubicCoeffA;
 
     //! Zero-weight the taps that fall outside the image and renormalise the rest, instead of
-    //! replicating the edge sample (ONNX `exclude_outside`). Only #INTER_CUBIC and #INTER_LANCZOS4
-    //! are affected: with two taps the two rules agree.
+    //! replicating the edge sample (ONNX `exclude_outside`). This affects #INTER_CUBIC,
+    //! #INTER_LANCZOS4 and antialiased #INTER_LINEAR.
     CV_PROP_RW bool excludeOutside;
 
-    //! apply antialiasing filter when downscaling (not yet implemented)
+    //! Widen the linear filter along each shrinking axis. Supported for #INTER_LINEAR with
+    //! #ResizeCoord::PIXEL_CENTER and 2D CV_8U or CV_32F Mat inputs and outputs.
     CV_PROP_RW bool antialias;
 
     //! precision/speed hint, consistent with #warpAffine/#warpPerspective/#remap/#cvtColor.
