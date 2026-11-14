@@ -1095,7 +1095,7 @@ TEST(Imgproc_WarpAffine, IntegerTranslation)
 
 TEST(Imgproc_WarpAffine, IntegerTranslationPreservesUnsupportedCases)
 {
-    const Mat src(2, 7, CV_8UC(5), Scalar::all(17));
+    const Mat src(2, 7, CV_8UC(5));
     const Matx23d identity(1, 0, 0, 0, 1, 0);
     Mat dst;
     for (int interpolation : {INTER_CUBIC, INTER_LANCZOS4, INTER_LINEAR_EXACT, INTER_NEAREST_EXACT})
