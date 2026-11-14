@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 3
+          fetch-depth: 4
       - name: Build and validate
         shell: bash
         run: |
@@ -24,16 +24,22 @@ jobs:
           test "$(uname -m)" = x86_64
           lscpu
           c++ --version
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release             -DBUILD_LIST=imgproc,ts -DBUILD_TESTS=ON -DBUILD_PERF_TESTS=ON             -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DWITH_OPENCL=OFF             -DWITH_IPP=OFF -DWITH_ITT=OFF -DWITH_LAPACK=OFF             -DWITH_ADE=OFF -DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release             -DBUILD_LIST=imgproc,ts -DBUILD_TESTS=ON -DBUILD_PERF_TESTS=ON             -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DWITH_OPENCL=OFF             -DWITH_IPP=OFF -DWITH_ITT=OFF -DWITH_LAPACK=OFF             -DWITH_ADE=OFF -DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF \
+            -DWITH_JPEG=OFF -DWITH_PNG=OFF -DWITH_TIFF=OFF -DWITH_WEBP=OFF \
+            -DWITH_OPENEXR=OFF -DWITH_OPENJPEG=OFF -DWITH_GTK=OFF -DWITH_QT=OFF
           cmake --build build --target opencv_test_imgproc opencv_perf_imgproc
           mkdir -p evidence/candidate evidence/baseline
           cp -L build/lib/libopencv_imgproc.so.502 evidence/candidate/
           build/bin/opencv_test_imgproc --gtest_filter='*WarpAffine*:*warpAffine*'
           build/bin/opencv_perf_imgproc --gtest_filter='*WarpAffineIntegerTranslation*'             --perf_threads=1 --perf_force_samples=100 --perf_verify_sanity=true             --gtest_output=xml:evidence/perf-candidate.xml
           c++ -O3 -std=c++17 -Ibuild -Imodules/core/include -Imodules/imgproc/include             -Imodules/geometry/include warp-affine-probe.cpp -Lbuild/lib             -lopencv_imgproc -lopencv_geometry -lopencv_core -o build/warp-affine-probe
-          git show HEAD^:modules/imgproc/src/imgwarp.cpp > modules/imgproc/src/imgwarp.cpp
+          git show 205613a29728c2217049bdddbbe98322b485b34e:modules/imgproc/src/imgwarp.cpp > modules/imgproc/src/imgwarp.cpp
           cmake --build build --target opencv_imgproc
           cp -L build/lib/libopencv_imgproc.so.502 evidence/baseline/
+          if cmp -s evidence/{baseline,candidate}/libopencv_imgproc.so.502; then
+            echo "The baseline and candidate libraries are identical" >&2
+            exit 1
+          fi
           build/bin/opencv_test_imgproc --gtest_filter='Imgproc_WarpAffine.IntegerTranslation'
           build/bin/opencv_perf_imgproc --gtest_filter='*WarpAffineIntegerTranslation*'             --perf_threads=1 --perf_force_samples=100 --perf_verify_sanity=true             --gtest_output=xml:evidence/perf-baseline.xml
           for variant in baseline candidate; do
