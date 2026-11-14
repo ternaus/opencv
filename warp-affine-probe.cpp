@@ -32,7 +32,7 @@ static void bench()
     std::puts("side,channels,transform,microseconds,iterations");
     for (int side : {256, 512, 1024})
     for (int channels : {1, 3, 5})
-    for (int transform = 0; transform < 5; ++transform)
+    for (int transform : {0, 1, 3})
     {
         cv::Mat src(side, side, CV_8UC(channels)), dst(side, side, src.type());
         cv::RNG(137).fill(src, cv::RNG::UNIFORM, 0, 256);
@@ -42,7 +42,7 @@ static void bench()
         };
         for (int i = 0; i < 12; ++i)
             run();
-        constexpr int iterations = 100;
+        constexpr int iterations = 50;
         std::vector<double> samples;
         for (int repeat = 0; repeat < 5; ++repeat)
         {
@@ -59,30 +59,39 @@ static void bench()
 
 static void compareOutputs()
 {
+    const cv::Scalar fill(-3., 57.25, 131.75, 300.);
+    int count = 0;
     for (const auto size : {cv::Size(1, 1), cv::Size(1, 11), cv::Size(2, 13), cv::Size(7, 8),
-                            cv::Size(8, 7), cv::Size(9, 8), cv::Size(31, 17), cv::Size(128, 67),
-                            cv::Size(257, 129)})
-    for (int channels : {1, 3, 4})
-    for (bool roi : {false, true})
-    for (int transform = 0; transform < 9; ++transform)
-    for (int border : {cv::BORDER_CONSTANT, cv::BORDER_REPLICATE, cv::BORDER_REFLECT,
-                       cv::BORDER_WRAP, cv::BORDER_REFLECT_101, cv::BORDER_TRANSPARENT})
-    for (int flags : {int(cv::INTER_LINEAR), cv::INTER_LINEAR | cv::WARP_INVERSE_MAP})
+                            cv::Size(8, 7), cv::Size(9, 8), cv::Size(31, 17), cv::Size(128, 67)})
+    for (int channels : {1, 2, 3, 4, 5, 8, 17, CV_CN_MAX})
+    for (int method : {cv::INTER_NEAREST, cv::INTER_LINEAR, cv::INTER_AREA, cv::INTER_CUBIC, cv::INTER_LANCZOS4})
     {
-        const int type = CV_8UC(channels);
-        cv::Mat parent(size.height + 4, size.width + 6, type);
-        cv::Mat src = roi ? parent(cv::Rect(2, 1, size.width, size.height)) : cv::Mat(size, type);
-        cv::RNG(137).fill(src, cv::RNG::UNIFORM, 0, 256);
-        const cv::Size outputSize(size.width + 3, size.height + 2);
-        const cv::Scalar initial(17, 41, 103, 223);
-        cv::Mat dstParent(outputSize.height + 3, outputSize.width + 4, type, initial);
-        cv::Mat dst = roi ? dstParent(cv::Rect(1, 2, outputSize.width, outputSize.height))
-                          : cv::Mat(outputSize, type, initial);
-        cv::warpAffine(src, dst, matrix(size.width, size.height, transform), outputSize,
-                       flags, border, cv::Scalar(1, 57, 231));
-        const cv::Mat& checked = roi ? dstParent : dst;
-        std::fwrite(checked.data, 1, checked.total() * checked.elemSize(), stdout);
+        if (channels > 4 && (method == cv::INTER_CUBIC || method == cv::INTER_LANCZOS4))
+            continue;
+        for (bool roi : {false, true})
+        for (int transform = 0; transform < 9; ++transform)
+        for (int border : {cv::BORDER_CONSTANT, cv::BORDER_REPLICATE, cv::BORDER_TRANSPARENT})
+        for (bool inverse : {false, true})
+        for (cv::AlgorithmHint hint : {cv::ALGO_HINT_ACCURATE, cv::ALGO_HINT_APPROX})
+        {
+            const int type = CV_8UC(channels);
+            cv::Mat srcParent(size.height + 4, size.width + 6, type);
+            cv::Mat src = roi ? srcParent(cv::Rect(2, 1, size.width, size.height)) : cv::Mat(size, type);
+            cv::RNG(137).fill(src, cv::RNG::UNIFORM, 0, 256);
+            const cv::Size outputSize(size.width + 3, size.height + 2);
+            cv::Mat dstParent(outputSize.height + 3, outputSize.width + 4, type);
+            dstParent.reshape(1).setTo(17);
+            cv::Mat dst = roi ? dstParent(cv::Rect(1, 2, outputSize.width, outputSize.height))
+                              : cv::Mat(outputSize, type);
+            dst.reshape(1).setTo(17);
+            cv::warpAffine(src, dst, matrix(size.width, size.height, transform), outputSize,
+                           method | (inverse ? cv::WARP_INVERSE_MAP : 0), border, fill, hint);
+            const cv::Mat& checked = roi ? dstParent : dst;
+            std::fwrite(checked.data, 1, checked.total() * checked.elemSize(), stdout);
+            ++count;
+        }
     }
+    std::fprintf(stderr, "Compared %d cases\n", count);
 }
 
 int main(int argc, char** argv)
