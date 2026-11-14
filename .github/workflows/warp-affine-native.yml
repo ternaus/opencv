@@ -1,0 +1,82 @@
+name: Native x86-64 affine translation
+on: push
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 38
+    env:
+      OMP_NUM_THREADS: 1
+      OPENBLAS_NUM_THREADS: 1
+      MKL_NUM_THREADS: 1
+      VECLIB_MAXIMUM_THREADS: 1
+      NUMEXPR_NUM_THREADS: 1
+      CMAKE_BUILD_PARALLEL_LEVEL: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 3
+      - name: Build and validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          lscpu
+          c++ --version
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release             -DBUILD_LIST=imgproc,ts -DBUILD_TESTS=ON -DBUILD_PERF_TESTS=ON             -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DWITH_OPENCL=OFF             -DWITH_IPP=OFF -DWITH_ITT=OFF -DWITH_LAPACK=OFF             -DWITH_ADE=OFF -DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF
+          cmake --build build --target opencv_test_imgproc opencv_perf_imgproc
+          mkdir -p evidence/candidate evidence/baseline
+          cp -L build/lib/libopencv_imgproc.so.502 evidence/candidate/
+          build/bin/opencv_test_imgproc --gtest_filter='*WarpAffine*:*warpAffine*'
+          build/bin/opencv_perf_imgproc --gtest_filter='*WarpAffineIntegerTranslation*'             --perf_threads=1 --perf_force_samples=100 --perf_verify_sanity=true             --gtest_output=xml:evidence/perf-candidate.xml
+          c++ -O3 -std=c++17 -Ibuild -Imodules/core/include -Imodules/imgproc/include             -Imodules/geometry/include warp-affine-probe.cpp -Lbuild/lib             -lopencv_imgproc -lopencv_geometry -lopencv_core -o build/warp-affine-probe
+          git show HEAD^:modules/imgproc/src/imgwarp.cpp > modules/imgproc/src/imgwarp.cpp
+          cmake --build build --target opencv_imgproc
+          cp -L build/lib/libopencv_imgproc.so.502 evidence/baseline/
+          build/bin/opencv_test_imgproc --gtest_filter='Imgproc_WarpAffine.IntegerTranslation'
+          build/bin/opencv_perf_imgproc --gtest_filter='*WarpAffineIntegerTranslation*'             --perf_threads=1 --perf_force_samples=100 --perf_verify_sanity=true             --gtest_output=xml:evidence/perf-baseline.xml
+          for variant in baseline candidate; do
+            export LD_LIBRARY_PATH="$PWD/evidence/$variant:$PWD/build/lib"
+            ldd build/warp-affine-probe | grep "evidence/$variant/libopencv_imgproc"
+            build/warp-affine-probe --compare | sha256sum > "evidence/$variant.sha256"
+          done
+          cmp evidence/baseline.sha256 evidence/candidate.sha256
+          cpu=$(awk '/Cpus_allowed_list/ {split($2, ids, /[-,]/); print ids[1]}' /proc/self/status)
+          for pair in baseline:1 candidate:1 candidate:2 baseline:2; do
+            variant=${pair%:*}
+            trial=${pair#*:}
+            export LD_LIBRARY_PATH="$PWD/evidence/$variant:$PWD/build/lib"
+            taskset -c "$cpu" build/warp-affine-probe > "evidence/$variant-$trial.csv"
+          done
+          python3 - <<'PY'
+          import csv
+          import statistics
+          from pathlib import Path
+
+          def read(variant):
+              samples = {}
+              for trial in (1, 2):
+                  path = Path(f"evidence/{variant}-{trial}.csv")
+                  for row in csv.DictReader(path.open()):
+                      key = tuple(int(row[name]) for name in ("side", "channels", "transform"))
+                      samples.setdefault(key, []).append(float(row["microseconds"]))
+              return {key: statistics.median(values) for key, values in samples.items()}
+
+          baseline = read("baseline")
+          candidate = read("candidate")
+          with Path("evidence/comparison.csv").open("w") as output:
+              print("side,channels,transform,baseline_us,candidate_us,speedup", file=output)
+              for key, before in baseline.items():
+                  after = candidate[key]
+                  print(*key, f"{before:.3f}", f"{after:.3f}", f"{before / after:.3f}", sep=",", file=output)
+          PY
+          cat evidence/comparison.csv
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: affine-translation-native-x86
+          path: |
+            evidence/*.csv
+            evidence/*.xml
+            evidence/*.sha256
