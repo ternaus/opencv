@@ -1,0 +1,29 @@
+name: Affine translation with IPP
+on: push
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 4
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test with IPP
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_LIST=imgproc,ts -DBUILD_TESTS=ON -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DWITH_OPENCL=OFF -DWITH_IPP=ON -DWITH_ITT=OFF -DWITH_LAPACK=OFF -DWITH_ADE=OFF -DWITH_FFMPEG=OFF -DWITH_GSTREAMER=OFF -DWITH_JPEG=OFF -DWITH_PNG=OFF -DWITH_TIFF=OFF -DWITH_WEBP=OFF -DWITH_OPENEXR=OFF -DWITH_OPENJPEG=OFF -DWITH_GTK=OFF -DWITH_QT=OFF | tee configure.log
+          grep -E 'Intel IPP: +[0-9]|Intel IPP: +[Ii]ntel' configure.log
+          grep -E 'Intel IPP IW: +sources' configure.log
+          cmake --build build --target opencv_test_imgproc
+          build/bin/opencv_test_imgproc --gtest_filter='*WarpAffine*' --gtest_output=xml:ipp-tests.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: affine-translation-ipp
+          path: |
+            configure.log
+            ipp-tests.xml
