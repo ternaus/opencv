@@ -10,6 +10,7 @@ using ByteVector = __m128i;
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <cstdlib>
 #include <iostream>
 #include <numeric>
 #include <random>
@@ -191,7 +192,11 @@ void shuffledRow(const Byte* in, Byte* out, int bytes, const Shuffle& plan)
             }
             else
             {
-                result = {};
+                #if defined(__aarch64__)
+                result = vdupq_n_u8(0);
+#else
+                result = _mm_setzero_si128();
+#endif
                 const Store store = plan.stores[step];
                 for (int k = store.first; k < store.end; ++k)
                 {
@@ -265,10 +270,12 @@ double timed(Function function, int iterations)
     return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count() / iterations;
 }
 
-int main(int argc, char**)
+int main(int argc, char** argv)
 {
     cv::setNumThreads(1);
-    const bool parityOnly = argc > 1;
+    const bool parityOnly = argc > 1 && std::strcmp(argv[1], "--parity") == 0;
+    const bool mixOnly = argc > 1 && std::strcmp(argv[1], "--mix-only") == 0;
+    const int benchmarkSize = argc > 2 ? std::atoi(argv[2]) : 512;
     cv::RNG bytes(137);
     std::mt19937 random(137);
     std::vector<int> channelCounts = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 24, 31, 32, 48, 64, 96, 128};
@@ -283,7 +290,7 @@ int main(int argc, char**)
         for (int depth : {CV_8U, CV_16F, CV_32F})
             for (bool roi : {false, true})
             {
-                const int size = parityOnly ? 33 : 512;
+                const int size = parityOnly ? 33 : benchmarkSize;
                 int type = CV_MAKETYPE(depth, channels);
                 cv::Mat srcParent(size, size, type);
                 cv::Mat dstParent(srcParent.size(), type), referenceParent(srcParent.size(), type);
@@ -319,8 +326,11 @@ int main(int argc, char**)
                 mix();
                 scalar();
                 if (!exact()) return 1;
-                neon();
-                if (!exact()) return 2;
+                if (!mixOnly)
+                {
+                    neon();
+                    if (!exact()) return 2;
+                }
                 if (parityOnly) continue;
                 const int iterations = std::max(8, std::min(140, static_cast<int>(8000.0 / timed(mix, 3))));
                 std::array<double, 5> generic, pixels, vector;
@@ -328,13 +338,13 @@ int main(int argc, char**)
                     if (rep % 2 == 0)
                     {
                         generic[rep] = timed(mix, iterations);
-                        pixels[rep] = timed(scalar, iterations);
-                        vector[rep] = timed(neon, iterations);
+                        pixels[rep] = mixOnly ? 0 : timed(scalar, iterations);
+                        vector[rep] = mixOnly ? 0 : timed(neon, iterations);
                     }
                     else
                     {
-                        vector[rep] = timed(neon, iterations);
-                        pixels[rep] = timed(scalar, iterations);
+                        vector[rep] = mixOnly ? 0 : timed(neon, iterations);
+                        pixels[rep] = mixOnly ? 0 : timed(scalar, iterations);
                         generic[rep] = timed(mix, iterations);
                     }
                 std::sort(generic.begin(), generic.end());

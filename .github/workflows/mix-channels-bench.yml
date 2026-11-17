@@ -1,4 +1,4 @@
-name: mixChannels native x86 probe
+name: mixChannels native x86 benchmarks
 
 on:
   push:
@@ -9,9 +9,12 @@ permissions:
   contents: read
 
 jobs:
-  probe:
+  bench:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - name: Build baseline OpenCV core
@@ -19,12 +22,34 @@ jobs:
           lscpu
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_LIST=core -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DBUILD_opencv_python3=OFF -DBUILD_JAVA=OFF -DWITH_IPP=OFF -DWITH_OPENCL=OFF -DWITH_ITT=OFF -DWITH_ADE=OFF -DWITH_LAPACK=OFF
           cmake --build build --target opencv_core --parallel 4
-      - name: Check parity across every channel count and benchmark
-        run: |
+          cp -a build/lib build/baseline
           c++ -O3 -std=c++17 -mssse3 -I modules/core/include -I build benchmarks/mix-channels-probe.cpp -L build/lib -Wl,-rpath,"$PWD/build/lib" -lopencv_core -o build/mix-channels-probe
+      - name: Check SIMD and pixel traversal candidates
+        run: |
           build/mix-channels-probe --parity
-          build/mix-channels-probe | tee mix-channels-x86.tsv
+          build/mix-channels-probe > x86-probe.tsv
+      - name: Build patched mixChannels
+        run: |
+          git apply --check benchmarks/mix-channels-candidate.patch
+          git apply benchmarks/mix-channels-candidate.patch
+          cmake -S . -B build
+          cmake --build build --target opencv_core --parallel 4
+          build/mix-channels-probe --parity
+      - name: Compare both public mixChannels implementations
+        run: |
+          for size in 16 64 256 512; do
+            for rep in 1 2 3; do
+              order="baseline candidate"
+              if [ "$rep" = 2 ]; then order="candidate baseline"; fi
+              for target in $order; do
+                library="$PWD/build/lib"
+                if [ "$target" = baseline ]; then library="$PWD/build/baseline"; fi
+                LD_LIBRARY_PATH="$library" build/mix-channels-probe --mix-only "$size" > "x86-${target}-${size}-${rep}.tsv"
+              done
+            done
+          done
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: mix-channels-x86
-          path: mix-channels-x86.tsv
+          path: x86-*.tsv
