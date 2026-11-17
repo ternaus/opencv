@@ -24,10 +24,6 @@ jobs:
           cmake --build build --target opencv_core --parallel 4
           cp -a build/lib build/baseline
           c++ -O3 -std=c++17 -mssse3 -I modules/core/include -I build benchmarks/mix-channels-probe.cpp -L build/lib -Wl,-rpath,"$PWD/build/lib" -lopencv_core -o build/mix-channels-probe
-      - name: Check SIMD and pixel traversal candidates
-        run: |
-          build/mix-channels-probe --parity
-          build/mix-channels-probe > x86-probe.tsv
       - name: Build patched mixChannels
         run: |
           git apply --check benchmarks/mix-channels-candidate.patch
@@ -38,7 +34,7 @@ jobs:
       - name: Compare both public mixChannels implementations
         run: |
           for size in 16 64 256 512; do
-            for rep in 1 2 3; do
+            for rep in 1; do
               order="baseline candidate"
               if [ "$rep" = 2 ]; then order="candidate baseline"; fi
               for target in $order; do

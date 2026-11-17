@@ -82,10 +82,10 @@ index 0000000000..3af21c12fc
 +} // namespace opencv_test
 diff --git a/modules/core/src/channel_permutation.simd.hpp b/modules/core/src/channel_permutation.simd.hpp
 new file mode 100644
-index 0000000000..d2c60cc9b3
+index 0000000000..715934e41f
 --- /dev/null
 +++ b/modules/core/src/channel_permutation.simd.hpp
-@@ -0,0 +1,147 @@
+@@ -0,0 +1,152 @@
 +// This file is part of OpenCV project.
 +// It is subject to the license terms in the LICENSE file found in the top-level directory
 +// of this distribution and at http://opencv.org/license.html
@@ -170,10 +170,14 @@ index 0000000000..d2c60cc9b3
 +bool permuteByteChannels(NAryMatIterator& it, const int* order, int channels)
 +{
 +#if CV_SSSE3 || (defined(CV_NEON_AARCH64) && CV_NEON_AARCH64)
++#if defined(CV_NEON_AARCH64) && CV_NEON_AARCH64
++    if (channels >= 9 && channels <= 12)
++        return false;
++#endif
++
++    // Align each block to both a pixel boundary and a vector boundary.
 +    const int blockBytes = std::lcm(channels, vectorBytes);
 +    const int steps = blockBytes / vectorBytes;
-+    if (it.size * channels < static_cast<size_t>(blockBytes))
-+        return false;
 +
 +    int indices[vectorBytes][vectorBytes];
 +    int bases[vectorBytes];
@@ -190,6 +194,7 @@ index 0000000000..d2c60cc9b3
 +        vectors = std::max(vectors, (*range.second - bases[step]) / vectorBytes + 1);
 +    }
 +
++    CV_DbgAssert(vectors <= 4);
 +    ByteShuffle shuffles[vectorBytes];
 +    for (int step = 0; step < steps; ++step)
 +    {
@@ -234,7 +239,7 @@ index 0000000000..d2c60cc9b3
 +CV_CPU_OPTIMIZATION_NAMESPACE_END
 +} // namespace cv
 diff --git a/modules/core/src/channels.cpp b/modules/core/src/channels.cpp
-index e88d34a47e..d39c74cbd2 100644
+index e88d34a47e..7685d207b5 100644
 --- a/modules/core/src/channels.cpp
 +++ b/modules/core/src/channels.cpp
 @@ -6,6 +6,11 @@
@@ -249,7 +254,7 @@ index e88d34a47e..d39c74cbd2 100644
  
  /****************************************************************************************\
  *                       Generalized split/merge: mixing channels                         *
-@@ -91,6 +96,151 @@ static MixChannelsFunc getMixchFunc(int depth)
+@@ -91,6 +96,148 @@ static MixChannelsFunc getMixchFunc(int depth)
      return mixchTab[depth];
  }
  
@@ -263,7 +268,7 @@ index e88d34a47e..d39c74cbd2 100644
 +
 +#if CV_SIMD || CV_SIMD_SCALABLE
 +template<typename T, typename VecT, int channels, bool swapRB = false>
-+static void permuteChannels(NAryMatIterator& it, uchar** ptrs, const int* order)
++static void permuteChannels(NAryMatIterator& it, const int* order)
 +{
 +    const int lanes = VTraits<VecT>::vlanes();
 +    const int pixels = static_cast<int>(it.size);
@@ -276,8 +281,8 @@ index e88d34a47e..d39c74cbd2 100644
 +
 +    for (size_t plane = 0; plane < it.nplanes; ++plane, ++it)
 +    {
-+        const T* src = reinterpret_cast<const T*>(ptrs[0]);
-+        T* dst = reinterpret_cast<T*>(ptrs[1]);
++        const T* src = reinterpret_cast<const T*>(it.ptrs[0]);
++        T* dst = reinterpret_cast<T*>(it.ptrs[1]);
 +        int pixel = 0;
 +        for (; pixel <= pixels - lanes; pixel += lanes, src += lanes * channels, dst += lanes * channels)
 +        {
@@ -303,41 +308,36 @@ index e88d34a47e..d39c74cbd2 100644
 +}
 +
 +template<typename T, typename VecT>
-+static void permuteChannels(NAryMatIterator& it, uchar** ptrs, const int* order, int channels)
++static void permuteChannels(NAryMatIterator& it, const int* order, int channels)
 +{
 +    const bool swapRB = order[0] == 2 && order[1] == 1;
 +    if (channels == 2)
-+        permuteChannels<T, VecT, 2>(it, ptrs, order);
++        permuteChannels<T, VecT, 2>(it, order);
 +    else if (channels == 3)
 +    {
 +        if (swapRB)
-+            permuteChannels<T, VecT, 3, true>(it, ptrs, order);
++            permuteChannels<T, VecT, 3, true>(it, order);
 +        else
-+            permuteChannels<T, VecT, 3>(it, ptrs, order);
++            permuteChannels<T, VecT, 3>(it, order);
 +    }
 +    else if (swapRB && order[3] == 3)
-+        permuteChannels<T, VecT, 4, true>(it, ptrs, order);
++        permuteChannels<T, VecT, 4, true>(it, order);
 +    else
-+        permuteChannels<T, VecT, 4>(it, ptrs, order);
++        permuteChannels<T, VecT, 4>(it, order);
 +}
-+
 +#endif
 +
-+static bool tryPermuteBytes(NAryMatIterator& it, const int* order, int channels)
-+{
-+    CV_CPU_DISPATCH(permuteByteChannels, (it, order, channels), CV_CPU_DISPATCH_MODES_ALL);
-+}
-+
 +static bool tryPermuteChannels(const Mat& src, const Mat& dst, const int* fromTo, size_t npairs,
-+                               NAryMatIterator& it, uchar** ptrs)
++                               NAryMatIterator& it)
 +{
 +    const int channels = src.channels();
 +    if (npairs != static_cast<size_t>(channels) || src.type() != dst.type() || src.empty() || dst.empty())
 +        return false;
 +
 +    const size_t elemSize = src.elemSize1();
-+    const bool bytes = channels >= 5 && channels <= 16 && elemSize == 1;
-+    const bool wideFloat = channels >= 32 && src.depth() == CV_32F;
++    const size_t pixels = it.size * it.nplanes;
++    const bool bytes = channels >= 5 && channels <= 16 && elemSize == 1 && it.size >= 16 && pixels >= 1024;
++    const bool wideFloat = channels >= 32 && src.depth() == CV_32F && pixels >= 65536;
 +#if CV_SIMD || CV_SIMD_SCALABLE
 +    const bool small = channels >= 2 && channels <= 4 && elemSize <= 4;
 +#else
@@ -362,7 +362,7 @@ index e88d34a47e..d39c74cbd2 100644
 +        if (from < 0 || order[to] >= 0 || used[from])
 +            return false;
 +        order[to] = from;
-+        used.set(from);
++        used[from] = true;
 +        identity &= from == to;
 +    }
 +
@@ -372,11 +372,13 @@ index e88d34a47e..d39c74cbd2 100644
 +        return true;
 +    }
 +    if (bytes)
-+        return tryPermuteBytes(it, order, channels);
++    {
++        CV_CPU_DISPATCH(permuteByteChannels, (it, order, channels), CV_CPU_DISPATCH_MODES_ALL);
++    }
 +    if (wideFloat)
 +    {
 +        for (size_t plane = 0; plane < it.nplanes; ++plane, ++it)
-+            copyPermutedPixels(reinterpret_cast<const unsigned*>(ptrs[0]), reinterpret_cast<unsigned*>(ptrs[1]),
++            copyPermutedPixels(reinterpret_cast<const unsigned*>(it.ptrs[0]), reinterpret_cast<unsigned*>(it.ptrs[1]),
 +                               static_cast<int>(it.size), order, channels);
 +        return true;
 +    }
@@ -385,13 +387,13 @@ index e88d34a47e..d39c74cbd2 100644
 +    switch (elemSize)
 +    {
 +    case 1:
-+        permuteChannels<uchar, v_uint8>(it, ptrs, order, channels);
++        permuteChannels<uchar, v_uint8>(it, order, channels);
 +        return true;
 +    case 2:
-+        permuteChannels<ushort, v_uint16>(it, ptrs, order, channels);
++        permuteChannels<ushort, v_uint16>(it, order, channels);
 +        return true;
 +    case 4:
-+        permuteChannels<unsigned, v_uint32>(it, ptrs, order, channels);
++        permuteChannels<unsigned, v_uint32>(it, order, channels);
 +        return true;
 +    }
 +#endif
@@ -401,21 +403,21 @@ index e88d34a47e..d39c74cbd2 100644
  } // cv::
  
  
-@@ -156,6 +306,9 @@ void cv::mixChannels( const Mat* src, size_t nsrcs, Mat* dst, size_t ndsts, cons
+@@ -156,6 +303,9 @@ void cv::mixChannels( const Mat* src, size_t nsrcs, Mat* dst, size_t ndsts, cons
      MixChannelsFunc func = getMixchFunc(depth);
      CV_Assert(func);
  
-+    if (nsrcs == 1 && ndsts == 1 && tryPermuteChannels(src[0], dst[0], fromTo, npairs, it, ptrs))
++    if (nsrcs == 1 && ndsts == 1 && tryPermuteChannels(src[0], dst[0], fromTo, npairs, it))
 +        return;
 +
      for( i = 0; i < it.nplanes; i++, ++it )
      {
          for( k = 0; k < npairs; k++ )
 diff --git a/modules/core/test/test_operations.cpp b/modules/core/test/test_operations.cpp
-index e2f39d3e6b..a80ea6adfa 100644
+index e2f39d3e6b..348e0eddb0 100644
 --- a/modules/core/test/test_operations.cpp
 +++ b/modules/core/test/test_operations.cpp
-@@ -47,6 +47,100 @@
+@@ -47,6 +47,110 @@
  namespace opencv_test {
  namespace {
  
@@ -478,6 +480,16 @@ index e2f39d3e6b..a80ea6adfa 100644
 +    EXPECT_EQ(Vec3b(11, 11, 11), pixels.back());
 +}
 +
++TEST(Core_MixChannels, partial_mapping_with_full_pair_count)
++{
++    const Mat src(7, 39, CV_8UC4, Scalar(11, 22, 33, 44));
++    Mat dst(src.size(), src.type(), Scalar::all(77));
++    const Mat expected(src.size(), src.type(), Scalar(44, 0, 77, 77));
++    const int fromTo[] = {0, 0, 2, 0, -1, 1, 3, 0};
++    cv::mixChannels(&src, 1, &dst, 1, fromTo, 4);
++    EXPECT_EQ(0, cvtest::norm(dst, expected, NORM_INF));
++}
++
 +TEST(Core_MixChannels, wide_interleaved_permutations)
 +{
 +    RNG rng(137);
@@ -487,7 +499,7 @@ index e2f39d3e6b..a80ea6adfa 100644
 +        {
 +            SCOPED_TRACE(cv::format("channels=%d roi=%d", channels, roi));
 +            const int type = CV_MAKETYPE(channels <= 16 ? CV_8U : CV_32F, channels);
-+            const Rect region(roi ? 1 : 0, 0, 39, 37);
++            const Rect region(roi ? 1 : 0, 0, channels <= 16 ? 39 : 257, channels <= 16 ? 37 : 256);
 +            Mat source(region.height, region.x + region.width + (roi ? 1 : 0), type);
 +            Mat destination = Mat::zeros(source.size(), type);
 +            Mat expected = Mat::zeros(source.size(), type);
