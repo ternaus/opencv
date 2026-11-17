@@ -1,0 +1,30 @@
+name: mixChannels native x86 probe
+
+on:
+  push:
+    branches: [codex/mix-channels-bench-20261117]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build baseline OpenCV core
+        run: |
+          lscpu
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_LIST=core -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DBUILD_opencv_python3=OFF -DBUILD_JAVA=OFF -DWITH_IPP=OFF -DWITH_OPENCL=OFF -DWITH_ITT=OFF -DWITH_ADE=OFF -DWITH_LAPACK=OFF
+          cmake --build build --target opencv_core --parallel 4
+      - name: Check parity across every channel count and benchmark
+        run: |
+          c++ -O3 -std=c++17 -mssse3 -I modules/core/include -I build benchmarks/mix-channels-probe.cpp -L build/lib -Wl,-rpath,"$PWD/build/lib" -lopencv_core -o build/mix-channels-probe
+          build/mix-channels-probe --parity
+          build/mix-channels-probe | tee mix-channels-x86.tsv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mix-channels-x86
+          path: mix-channels-x86.tsv
