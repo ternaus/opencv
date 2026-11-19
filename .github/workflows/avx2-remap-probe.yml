@@ -1,0 +1,39 @@
+name: CPU remap AVX2 probe
+on:
+  push:
+    branches: [codex/bench-30653-avx2]
+permissions:
+  contents: read
+jobs:
+  avx2:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require native x86_64 with AVX2 and F16C
+        run: |
+          test "$(uname -m)" = x86_64
+          grep -m1 '^model name' /proc/cpuinfo
+          grep -m1 '^flags' /proc/cpuinfo | grep -qw avx2
+          grep -m1 '^flags' /proc/cpuinfo | grep -qw f16c
+          c++ --version | head -1
+      - name: Configure CPU-only Release build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release '-DCPU_BASELINE=SSE3' '-DCPU_DISPATCH=AVX2' \
+            -DBUILD_LIST=imgproc,ts -DBUILD_TESTS=ON -DBUILD_PERF_TESTS=OFF -DBUILD_EXAMPLES=OFF \
+            -DBUILD_opencv_python3=OFF -DBUILD_opencv_apps=OFF -DWITH_CUDA=OFF -DWITH_OPENCL=OFF \
+            -DWITH_IPP=OFF -DWITH_KLEIDICV=OFF -DWITH_HARFBUZZ=OFF -DWITH_FREETYPE=OFF -DWITH_VTK=OFF \
+            -DWITH_ITT=OFF -DWITH_FFMPEG=OFF -DWITH_AVIF=OFF -DWITH_OPENEXR=OFF -DWITH_JASPER=OFF \
+            -DWITH_OPENJPEG=OFF -DWITH_WEBP=OFF -DWITH_TIFF=OFF -DWITH_GTK=OFF -DWITH_QT=OFF
+      - name: Build and measure the published PR head
+        run: |
+          cmake --build build --target opencv_imgproc --parallel 4
+          c++ -std=c++17 -O3 -I build -I modules/core/include -I modules/imgproc/include \
+            .github/avx2-probe/remap.cpp -L build/lib -Wl,-rpath,"$PWD/build/lib" -lopencv_imgproc -lopencv_core -o build/remap-probe
+          build/remap-probe | tee baseline.csv
+      - name: Upload timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: remap-avx2-cpu
+          path: '*.csv'
