@@ -1,0 +1,66 @@
+diff --git a/modules/imgproc/src/warp_kernels.simd.hpp b/modules/imgproc/src/warp_kernels.simd.hpp
+index f276ac316..a8def2904 100644
+--- a/modules/imgproc/src/warp_kernels.simd.hpp
++++ b/modules/imgproc/src/warp_kernels.simd.hpp
+@@ -8921,19 +8921,23 @@ static inline __m256 loadEightWarpHalf(const hfloat* src)
+     return _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src)));
+ }
+ 
+-template<int taps>
+-static inline void sumPackedWarpRGB(const float* values, hfloat* dst)
++static inline void storeThreeWarpHalf(const v_float32x4& rgb, hfloat* dst)
++{
++    hfloat packed[4];
++    v_pack_store(packed, rgb);
++    std::memcpy(dst, packed, 3*sizeof(hfloat));
++}
++
++static inline void sumPackedLanczosRGB(const float* values, hfloat* dst)
+ {
+     float red = values[0], green = values[1], blue = values[2];
+-    for (int tap = 1; tap < taps; ++tap)
++    for (int tap = 1; tap < 8; ++tap)
+     {
+         red += values[3*tap];
+         green += values[3*tap + 1];
+         blue += values[3*tap + 2];
+     }
+-    hfloat rgb[4];
+-    v_pack_store(rgb, v_float32x4(red, green, blue, 0.f));
+-    std::memcpy(dst, rgb, 3*sizeof(hfloat));
++    storeThreeWarpHalf(v_float32x4(red, green, blue, 0.f), dst);
+ }
+ 
+ static inline void bicubicWarpHalfRGB(const hfloat* src, size_t step,
+@@ -8953,10 +8957,18 @@ static inline void bicubicWarpHalfRGB(const hfloat* src, size_t step,
+     const __m256 lowWeights = _mm256_permutevar8x32_ps(_mm256_castps128_ps256(w),
+                                                        _mm256_setr_epi32(0, 0, 0, 1, 1, 1, 2, 2));
+     const __m128 highWeights = _mm_shuffle_ps(w, w, _MM_SHUFFLE(3, 3, 3, 2));
+-    float values[12];
+-    _mm256_storeu_ps(values, _mm256_mul_ps(low, lowWeights));
+-    _mm_storeu_ps(values + 8, _mm_mul_ps(high, highWeights));
+-    sumPackedWarpRGB<4>(values, dst);
++    low = _mm256_mul_ps(low, lowWeights);
++    high = _mm_mul_ps(high, highWeights);
++
++    // Shift the packed groups into RGB lanes before adding the four column taps.
++    const __m128i first = _mm_castps_si128(_mm256_castps256_ps128(low));
++    const __m128i middle = _mm_castps_si128(_mm256_extractf128_ps(low, 1));
++    const __m128i last = _mm_castps_si128(high);
++    const __m128 tap1 = _mm_castsi128_ps(_mm_alignr_epi8(middle, first, 12));
++    const __m128 tap2 = _mm_castsi128_ps(_mm_alignr_epi8(last, middle, 8));
++    const __m128 tap3 = _mm_castsi128_ps(_mm_srli_si128(last, 4));
++    const __m128 rgb = _mm_add_ps(_mm_add_ps(_mm_add_ps(_mm_castsi128_ps(first), tap1), tap2), tap3);
++    storeThreeWarpHalf(v_float32x4(rgb), dst);
+ }
+ 
+ static void remapLanczosHalfRGB(const hfloat* src, size_t step, const float* weights, hfloat* dst)
+@@ -8979,7 +8991,7 @@ static void remapLanczosHalfRGB(const hfloat* src, size_t step, const float* wei
+     _mm256_storeu_ps(values, sum0);
+     _mm256_storeu_ps(values + 8, sum1);
+     _mm256_storeu_ps(values + 16, sum2);
+-    sumPackedWarpRGB<8>(values, dst);
++    sumPackedLanczosRGB(values, dst);
+ }
+ #endif
+ 

@@ -34,8 +34,15 @@ jobs:
           c++ -std=c++17 -O3 -I build -I modules/core/include -I modules/imgproc/include \
             .github/avx2-probe/remap.cpp -L build/lib -Wl,-rpath,"$PWD/build/lib" -lopencv_imgproc -lopencv_core -o build/remap-probe
           build/remap-probe | tee baseline.csv
+      - name: Measure register-only cubic reduction
+        run: |
+          git apply --check .github/avx2-probe/registers.patch
+          git apply .github/avx2-probe/registers.patch
+          cmake --build build --target opencv_imgproc --parallel 4
+          build/remap-probe | tee registers.csv
       - name: Apply the candidate and repeat the same workload
         run: |
+          git apply -R .github/avx2-probe/registers.patch
           git apply --check .github/avx2-probe/optimization.patch
           git apply .github/avx2-probe/optimization.patch
           cmake --build build --target opencv_imgproc --parallel 4
@@ -44,7 +51,7 @@ jobs:
         run: |
           cmake --build build --target opencv_test_imgproc --parallel 4
           build/bin/opencv_test_imgproc --gtest_filter='*Imgproc_Warp*:*Imgproc_Remap*:*Imgproc_Cubic*' | tee accuracy.txt
-          OPENCV_CPU_DISABLE=AVX2 build/bin/opencv_test_imgproc --gtest_filter='*RemapHalfRGB*:*bilinear_half_rgb_fixed_relative_offsets*' | tee fallback.txt
+          OPENCV_CPU_DISABLE=AVX2 build/bin/opencv_test_imgproc --gtest_filter='*RemapHalfRGB*:*RemapCubicHalfRGB*:*bilinear_half_rgb_fixed_relative_offsets*' | tee fallback.txt
       - name: Upload timings
         if: always()
         uses: actions/upload-artifact@v4
