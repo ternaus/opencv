@@ -1,0 +1,168 @@
+diff --git a/modules/imgproc/src/imgwarp.cpp b/modules/imgproc/src/imgwarp.cpp
+index bb4eeb307..c34708c38 100644
+--- a/modules/imgproc/src/imgwarp.cpp
++++ b/modules/imgproc/src/imgwarp.cpp
+@@ -784,6 +784,13 @@ struct RemapBilinearVecC1<T, float>
+     }
+ };
+ 
++#if CV_TRY_AVX2
++static RemapBilinearHalfRGBFunc getRemapBilinearHalfRGB(bool relative)
++{
++    CV_CPU_DISPATCH(getRemapBilinearHalfRGB_, (relative), CV_CPU_DISPATCH_MODES_ALL);
++}
++#endif
++
+ static inline int remapBilinearSameRun( const short* XY, int dx, int end,
+                                          unsigned width1, unsigned height1, bool inl )
+ {
+@@ -902,6 +909,19 @@ static void remapBilinear( const Mat& _src, Mat& _dst, const Mat& _xy,
+                         D[0] = castOp(t0); D[1] = castOp(t1);
+                     }
+                 else if( cn == 3 )
++                {
++#if CV_TRY_AVX2
++                    if constexpr (std::is_same_v<T, hfloat> && std::is_same_v<AT, float>)
++                    {
++                        static const auto kernel = getRemapBilinearHalfRGB(isRelative);
++                        if (kernel)
++                        {
++                            kernel(S0, sstep, D, XY + 2*dx, FXY + dx, wtab, X1 - dx, subOffset);
++                            D += (X1 - dx)*3;
++                            dx = X1;
++                        }
++                    }
++#endif
+                     for( ; dx < X1; dx++, D += 3 )
+                     {
+                         int sx = XY[dx*2]+(isRelative ? (_offset.x+dx) : 0), sy = XY[dx*2+1]+off_y;
+@@ -917,6 +937,7 @@ static void remapBilinear( const Mat& _src, Mat& _dst, const Mat& _xy,
+                             D[0] = castOp(t0); D[1] = castOp(t1); D[2] = castOp(t2);
+                         }
+                     }
++                }
+                 else if( cn == 4 )
+                     for( ; dx < X1; dx++, D += 4 )
+                     {
+diff --git a/modules/imgproc/src/warp_common.hpp b/modules/imgproc/src/warp_common.hpp
+index 11a5f59f0..a8efab63f 100644
+--- a/modules/imgproc/src/warp_common.hpp
++++ b/modules/imgproc/src/warp_common.hpp
+@@ -21,16 +21,32 @@ typedef void (*ImgWarpFunc)(const float* x, const float* y, int len,
+ 
+ ImgWarpFunc getImgWarpFunc(int type, int interpolation);
+ 
++using RemapBilinearHalfRGBFunc = void (*)(const hfloat* src, size_t step, hfloat* dst,
++                                          const short* xy, const ushort* fractions,
++                                          const float* weights, int length, const Point& offset);
++
++#if CV_SIMD128 && CV_FP16 && (CV_NEON || CV_AVX2)
++static inline v_float32x4 loadBilinearFourHalf(const hfloat* source)
++{
++#if CV_AVX2
++    // F16C expands four halves. The generic SSE expansion loads eight.
++    return v_float32x4(_mm_cvtph_ps(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(source))));
++#else
++    return v_load_expand(source);
++#endif
++}
++#endif
++
+ // Interpolate two adjacent RGB pixels from each row, then store exactly three channels.
+ static inline void bilinearHalfRGB(const hfloat* top, const hfloat* bottom,
+                                    float w0, float w1, float w2, float w3, hfloat* dst)
+ {
+-#if CV_NEON && CV_FP16 && CV_SIMD128
+-    // On NEON these four-half loads collectively read only the six samples in each row.
+-    const v_float32x4 tl = v_load_expand(top);
+-    const v_float32x4 tr = v_rotate_right<1>(v_load_expand(top + 2));
+-    const v_float32x4 bl = v_load_expand(bottom);
+-    const v_float32x4 br = v_rotate_right<1>(v_load_expand(bottom + 2));
++#if CV_SIMD128 && CV_FP16 && (CV_NEON || CV_AVX2)
++    // These four-half loads collectively read only the six samples in each row.
++    const v_float32x4 tl = loadBilinearFourHalf(top);
++    const v_float32x4 tr = v_rotate_right<1>(loadBilinearFourHalf(top + 2));
++    const v_float32x4 bl = loadBilinearFourHalf(bottom);
++    const v_float32x4 br = v_rotate_right<1>(loadBilinearFourHalf(bottom + 2));
+     v_float32x4 sum = v_add(v_mul(tl, v_setall_f32(w0)), v_mul(tr, v_setall_f32(w1)));
+     sum = v_add(sum, v_mul(bl, v_setall_f32(w2)));
+     sum = v_add(sum, v_mul(br, v_setall_f32(w3)));
+diff --git a/modules/imgproc/src/warp_kernels.simd.hpp b/modules/imgproc/src/warp_kernels.simd.hpp
+index bdee83490..3b338786d 100644
+--- a/modules/imgproc/src/warp_kernels.simd.hpp
++++ b/modules/imgproc/src/warp_kernels.simd.hpp
+@@ -111,6 +111,7 @@ CV_CPU_OPTIMIZATION_NAMESPACE_BEGIN
+ 
+ ImgWarpFunc getBicubicWarpFunc_(int type);
+ ImgWarpFunc getBilinearHalfWarpFunc_(bool rgb);
++RemapBilinearHalfRGBFunc getRemapBilinearHalfRGB_(bool relative);
+ 
+ void warpAffineNearestInvoker_8UC1(const uint8_t *src_data, size_t src_step, int src_rows, int src_cols,
+                                    uint8_t *dst_data, size_t dst_step, int dst_rows, int dst_cols,
+@@ -8886,6 +8887,33 @@ ImgWarpFunc getBilinearHalfWarpFunc_(bool rgb)
+     return rgb ? bilinearWarpHalf<true> : bilinearWarpHalf<false>;
+ }
+ 
++#if CV_AVX2 && CV_FP16
++template<bool relative>
++static void remapBilinearHalfRGBFixed(const hfloat* src, size_t step, hfloat* dst,
++                                      const short* xy, const ushort* fractions,
++                                      const float* weights, int length, const Point& offset)
++{
++    for (int i = 0; i < length; ++i, dst += 3)
++    {
++        const int x = xy[2*i] + (relative ? offset.x + i : 0);
++        const int y = xy[2*i + 1] + (relative ? offset.y : 0);
++        const hfloat* top = src + size_t(y)*step + 3*size_t(x);
++        const float* w = weights + 4*fractions[i];
++        bilinearHalfRGB(top, top + step, w[0], w[1], w[2], w[3], dst);
++    }
++}
++#endif
++
++RemapBilinearHalfRGBFunc getRemapBilinearHalfRGB_(bool relative)
++{
++#if CV_AVX2 && CV_FP16
++    return relative ? remapBilinearHalfRGBFixed<true> : remapBilinearHalfRGBFixed<false>;
++#else
++    CV_UNUSED(relative);
++    return nullptr;
++#endif
++}
++
+ template<typename T>
+ static void bicubicWarpChannels(const float* x, const float* y, int len,
+                                 const void* source, size_t step, Size size, void* destination,
+diff --git a/modules/imgproc/test/test_imgwarp.cpp b/modules/imgproc/test/test_imgwarp.cpp
+index 886ab1a24..b7bb85939 100644
+--- a/modules/imgproc/test/test_imgwarp.cpp
++++ b/modules/imgproc/test/test_imgwarp.cpp
+@@ -1630,6 +1630,28 @@ TEST_P(Imgproc_RemapHalfRGB, linear_2x2_footprint)
+ INSTANTIATE_TEST_CASE_P(ImgProc, Imgproc_RemapHalfRGB,
+                         testing::Values(CV_32FC1, CV_32FC2, CV_16SC2));
+ 
++TEST(Imgproc_Remap, bilinear_half_rgb_fixed_relative_offsets)
++{
++    Mat wide(31, 275, CV_32FC3), half;
++    theRNG().fill(wide, RNG::UNIFORM, -1.f, 1.f);
++    wide.convertTo(half, CV_16F);
++    half.convertTo(wide, CV_32F);
++
++    const Size outputSize(273, 29);
++    const Mat mapX(outputSize, CV_32F, Scalar(0.25)), mapY(outputSize, CV_32F, Scalar(0.5));
++    Mat fixed, fractions, expected, actual;
++    convertMaps(mapX, mapY, fixed, fractions, CV_16SC2);
++    const int interpolation = INTER_LINEAR | WARP_RELATIVE_MAP;
++    remap(wide, expected, fixed, fractions, interpolation);
++    remap(half, actual, fixed, fractions, interpolation);
++    Mat expectedHalf;
++    expected.convertTo(expectedHalf, CV_16F);
++    expectedHalf.convertTo(expected, CV_32F);
++    Mat actualWide;
++    actual.convertTo(actualWide, CV_32F);
++    EXPECT_LE(cvtest::norm(expected, actualWide, NORM_INF), 1./1024.);
++}
++
+ TEST(Imgproc_Warp, float16_linear_transparent)
+ {
+     for (int channels : {1, 3, 4})
