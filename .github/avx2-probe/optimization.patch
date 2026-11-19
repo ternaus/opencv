@@ -1,13 +1,17 @@
 diff --git a/modules/imgproc/src/warp_kernels.simd.hpp b/modules/imgproc/src/warp_kernels.simd.hpp
-index f276ac316..4d0744ea4 100644
+index 4d0744ea4..7240c1628 100644
 --- a/modules/imgproc/src/warp_kernels.simd.hpp
 +++ b/modules/imgproc/src/warp_kernels.simd.hpp
-@@ -8921,19 +8921,23 @@ static inline __m256 loadEightWarpHalf(const hfloat* src)
-     return _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src)));
+@@ -8883,8 +8883,117 @@ static void bilinearWarpHalf(const float* x, const float* y, int len,
  }
  
--template<int taps>
--static inline void sumPackedWarpRGB(const float* values, hfloat* dst)
+ 
++#if CV_AVX2 && CV_FP16
++static inline __m256 loadEightWarpHalf(const hfloat* src)
++{
++    return _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src)));
++}
++
 +static inline void storeThreeWarpHalf(const v_float32x4& rgb, hfloat* dst)
 +{
 +    hfloat packed[4];
@@ -15,68 +19,16 @@ index f276ac316..4d0744ea4 100644
 +    std::memcpy(dst, packed, 3*sizeof(hfloat));
 +}
 +
-+static inline void sumPackedLanczosRGB(const float* values, hfloat* dst)
- {
-     float red = values[0], green = values[1], blue = values[2];
--    for (int tap = 1; tap < taps; ++tap)
-+    for (int tap = 1; tap < 8; ++tap)
-     {
-         red += values[3*tap];
-         green += values[3*tap + 1];
-         blue += values[3*tap + 2];
-     }
--    hfloat rgb[4];
--    v_pack_store(rgb, v_float32x4(red, green, blue, 0.f));
--    std::memcpy(dst, rgb, 3*sizeof(hfloat));
-+    storeThreeWarpHalf(v_float32x4(red, green, blue, 0.f), dst);
- }
- 
- static inline void bicubicWarpHalfRGB(const hfloat* src, size_t step,
-@@ -8953,10 +8957,18 @@ static inline void bicubicWarpHalfRGB(const hfloat* src, size_t step,
-     const __m256 lowWeights = _mm256_permutevar8x32_ps(_mm256_castps128_ps256(w),
-                                                        _mm256_setr_epi32(0, 0, 0, 1, 1, 1, 2, 2));
-     const __m128 highWeights = _mm_shuffle_ps(w, w, _MM_SHUFFLE(3, 3, 3, 2));
--    float values[12];
--    _mm256_storeu_ps(values, _mm256_mul_ps(low, lowWeights));
--    _mm_storeu_ps(values + 8, _mm_mul_ps(high, highWeights));
--    sumPackedWarpRGB<4>(values, dst);
-+    low = _mm256_mul_ps(low, lowWeights);
-+    high = _mm_mul_ps(high, highWeights);
++#endif
 +
-+    // Shift the packed groups into RGB lanes before adding the four column taps.
-+    const __m128i first = _mm_castps_si128(_mm256_castps256_ps128(low));
-+    const __m128i middle = _mm_castps_si128(_mm256_extractf128_ps(low, 1));
-+    const __m128i last = _mm_castps_si128(high);
-+    const __m128 tap1 = _mm_castsi128_ps(_mm_alignr_epi8(middle, first, 12));
-+    const __m128 tap2 = _mm_castsi128_ps(_mm_alignr_epi8(last, middle, 8));
-+    const __m128 tap3 = _mm_castsi128_ps(_mm_srli_si128(last, 4));
-+    const __m128 rgb = _mm_add_ps(_mm_add_ps(_mm_add_ps(_mm_castsi128_ps(first), tap1), tap2), tap3);
-+    storeThreeWarpHalf(v_float32x4(rgb), dst);
- }
- 
- static void remapLanczosHalfRGB(const hfloat* src, size_t step, const float* weights, hfloat* dst)
-@@ -8979,7 +8991,7 @@ static void remapLanczosHalfRGB(const hfloat* src, size_t step, const float* wei
-     _mm256_storeu_ps(values, sum0);
-     _mm256_storeu_ps(values + 8, sum1);
-     _mm256_storeu_ps(values + 16, sum2);
--    sumPackedWarpRGB<8>(values, dst);
-+    sumPackedLanczosRGB(values, dst);
- }
- #endif
- 
-@@ -9147,6 +9159,76 @@ static void bicubicWarpChannels(const float* x, const float* y, int len,
-     }
- }
- 
 +#if CV_AVX2 && CV_FP16 && CV_SIMD_WIDTH == 32
-+static inline void cubicRGBBlockWeights(__m256 fraction, float coefficient, float (&weights)[8][4])
++static inline void storeWarpWeights8(__m256 w0, __m256 w1, __m256 w2, __m256 w3,
++                                    float (&weights)[8][4])
 +{
-+    v_float32 w0, w1, w2, w3;
-+    bicubicWeights(v_float32(fraction), coefficient, w0, w1, w2, w3);
-+    __m128 lower0 = _mm256_castps256_ps128(w0.val), lower1 = _mm256_castps256_ps128(w1.val);
-+    __m128 lower2 = _mm256_castps256_ps128(w2.val), lower3 = _mm256_castps256_ps128(w3.val);
-+    __m128 upper0 = _mm256_extractf128_ps(w0.val, 1), upper1 = _mm256_extractf128_ps(w1.val, 1);
-+    __m128 upper2 = _mm256_extractf128_ps(w2.val, 1), upper3 = _mm256_extractf128_ps(w3.val, 1);
++    __m128 lower0 = _mm256_castps256_ps128(w0), lower1 = _mm256_castps256_ps128(w1);
++    __m128 lower2 = _mm256_castps256_ps128(w2), lower3 = _mm256_castps256_ps128(w3);
++    __m128 upper0 = _mm256_extractf128_ps(w0, 1), upper1 = _mm256_extractf128_ps(w1, 1);
++    __m128 upper2 = _mm256_extractf128_ps(w2, 1), upper3 = _mm256_extractf128_ps(w3, 1);
 +    _MM_TRANSPOSE4_PS(lower0, lower1, lower2, lower3);
 +    _MM_TRANSPOSE4_PS(upper0, upper1, upper2, upper3);
 +    _mm_storeu_ps(weights[0], lower0);
@@ -89,14 +41,38 @@ index f276ac316..4d0744ea4 100644
 +    _mm_storeu_ps(weights[7], upper3);
 +}
 +
-+static void bicubicWarpHalfRGBBlocks(const float* x, const float* y, int len,
-+                                     const void* source, size_t step, Size size, void* destination,
-+                                     const float* params, int borderType, const void* borderValue, int channels)
++static inline bool fullWarpFootprints8(__m256 x, __m256 y, __m256 minimum, __m256 maxX, __m256 maxY)
 +{
-+    const float coefficient = params ? *params : -0.75f;
-+    const __m256 minimum = _mm256_set1_ps(1.f);
++    const __m256 validX = _mm256_and_ps(_mm256_cmp_ps(x, minimum, _CMP_GE_OQ),
++                                        _mm256_cmp_ps(x, maxX, _CMP_LT_OQ));
++    const __m256 validY = _mm256_and_ps(_mm256_cmp_ps(y, minimum, _CMP_GE_OQ),
++                                        _mm256_cmp_ps(y, maxY, _CMP_LT_OQ));
++    return _mm256_movemask_ps(_mm256_and_ps(validX, validY)) == 0xff;
++}
++
++static inline void bilinearWarpHalfRGBWide(const hfloat* top, size_t step, const float* weights, hfloat* dst)
++{
++    const __m256 row0 = loadEightWarpHalf(top), row1 = loadEightWarpHalf(top + step);
++    const __m128 tl = _mm256_castps256_ps128(row0), bl = _mm256_castps256_ps128(row1);
++    const __m128 tr = _mm_castsi128_ps(_mm_alignr_epi8(_mm_castps_si128(_mm256_extractf128_ps(row0, 1)),
++                                                     _mm_castps_si128(tl), 12));
++    const __m128 br = _mm_castsi128_ps(_mm_alignr_epi8(_mm_castps_si128(_mm256_extractf128_ps(row1, 1)),
++                                                     _mm_castps_si128(bl), 12));
++    __m128 sum = _mm_add_ps(_mm_mul_ps(tl, _mm_set1_ps(weights[0])), _mm_mul_ps(tr, _mm_set1_ps(weights[1])));
++    sum = _mm_add_ps(sum, _mm_mul_ps(bl, _mm_set1_ps(weights[2])));
++    sum = _mm_add_ps(sum, _mm_mul_ps(br, _mm_set1_ps(weights[3])));
++    storeThreeWarpHalf(v_float32x4(sum), dst);
++}
++
++static void bilinearWarpHalfRGBBlocks(const float* x, const float* y, int len,
++                                      const void* source, size_t step, Size size, void* destination,
++                                      const float* params, int borderType, const void* borderValue, int channels)
++{
++    const __m256 zero = _mm256_setzero_ps();
++    const __m256 one = _mm256_set1_ps(1.f);
++    // Each load covers eight halves. A third source pixel must be available at the right.
 +    const __m256 maxX = _mm256_set1_ps(float(size.width - 2));
-+    const __m256 maxY = _mm256_set1_ps(float(size.height - 2));
++    const __m256 maxY = _mm256_set1_ps(float(size.height - 1));
 +    const size_t halfStep = step/sizeof(hfloat);
 +    const hfloat* src = static_cast<const hfloat*>(source);
 +    hfloat* dst = static_cast<hfloat*>(destination);
@@ -105,110 +81,193 @@ index f276ac316..4d0744ea4 100644
 +    for (; i + block <= len; i += block, dst += 3*block)
 +    {
 +        const __m256 sx = _mm256_loadu_ps(x + i), sy = _mm256_loadu_ps(y + i);
-+        const __m256 validX = _mm256_and_ps(_mm256_cmp_ps(sx, minimum, _CMP_GE_OQ),
-+                                            _mm256_cmp_ps(sx, maxX, _CMP_LT_OQ));
-+        const __m256 validY = _mm256_and_ps(_mm256_cmp_ps(sy, minimum, _CMP_GE_OQ),
-+                                            _mm256_cmp_ps(sy, maxY, _CMP_LT_OQ));
-+        if (_mm256_movemask_ps(_mm256_and_ps(validX, validY)) != 255)
++        if (!fullWarpFootprints8(sx, sy, zero, maxX, maxY))
 +        {
-+            bicubicWarpChannels<hfloat>(x + i, y + i, block, source, step, size, dst, params,
-+                                       borderType, borderValue, channels);
++            bilinearWarpHalf<true>(x + i, y + i, block, source, step, size, dst, params,
++                                   borderType, borderValue, channels);
 +            continue;
 +        }
 +
-+        // Complete footprints have positive coordinates, so truncation gives the floor.
 +        const __m256i ix = _mm256_cvttps_epi32(sx), iy = _mm256_cvttps_epi32(sy);
 +        int ixValues[block], iyValues[block];
 +        _mm256_storeu_si256(reinterpret_cast<__m256i*>(ixValues), ix);
 +        _mm256_storeu_si256(reinterpret_cast<__m256i*>(iyValues), iy);
-+        float wx[block][4], wy[block][4];
-+        cubicRGBBlockWeights(_mm256_sub_ps(sx, _mm256_cvtepi32_ps(ix)), coefficient, wx);
-+        cubicRGBBlockWeights(_mm256_sub_ps(sy, _mm256_cvtepi32_ps(iy)), coefficient, wy);
-+
++        const __m256 ax = _mm256_sub_ps(sx, _mm256_cvtepi32_ps(ix));
++        const __m256 ay = _mm256_sub_ps(sy, _mm256_cvtepi32_ps(iy));
++        const __m256 nx = _mm256_sub_ps(one, ax), ny = _mm256_sub_ps(one, ay);
++        float weights[block][4];
++        storeWarpWeights8(_mm256_mul_ps(nx, ny), _mm256_mul_ps(ax, ny),
++                          _mm256_mul_ps(nx, ay), _mm256_mul_ps(ax, ay), weights);
 +        for (int lane = 0; lane < block; ++lane)
 +        {
-+            const hfloat* top = src + size_t(iyValues[lane] - 1)*halfStep + 3*size_t(ixValues[lane] - 1);
-+            bicubicWarpHalfRGB(top, halfStep, wx[lane], wy[lane], dst + 3*lane);
++            const hfloat* top = src + size_t(iyValues[lane])*halfStep + 3*size_t(ixValues[lane]);
++            bilinearWarpHalfRGBWide(top, halfStep, weights[lane], dst + 3*lane);
 +        }
 +    }
 +
 +    if (i < len)
-+        bicubicWarpChannels<hfloat>(x + i, y + i, len - i, source, step, size, dst, params,
-+                                   borderType, borderValue, channels);
++        bilinearWarpHalf<true>(x + i, y + i, len - i, source, step, size, dst, params,
++                               borderType, borderValue, channels);
 +}
 +#endif
 +
- template<typename T, void (*fn)(const float*, const float*, int, const void*, size_t, Size, T*, const float*, int, T*)>
- static void bicubicWarpWrap(const float* x, const float* y, int len, const void* src, size_t srcstep, Size srcsize, void* dst, const float* coeffs, int flags, const void* fillval, int)
- {
-@@ -9155,6 +9237,10 @@ static void bicubicWarpWrap(const float* x, const float* y, int len, const void*
- 
- ImgWarpFunc getBicubicWarpFunc_(int type)
+ ImgWarpFunc getBilinearHalfWarpFunc_(bool rgb)
  {
 +#if CV_AVX2 && CV_FP16 && CV_SIMD_WIDTH == 32
-+    if (type == CV_16FC3)
-+        return bicubicWarpHalfRGBBlocks;
++    if (rgb)
++        return bilinearWarpHalfRGBBlocks;
 +#endif
-     if (CV_MAT_DEPTH(type) == CV_16F)
-         return bicubicWarpChannels<hfloat>;
-     if (CV_MAT_CN(type) > 4)
+     return rgb ? bilinearWarpHalf<true> : bilinearWarpHalf<false>;
+ }
+ 
+@@ -8916,18 +9025,6 @@ RemapBilinearHalfRGBFunc getRemapBilinearHalfRGB_(bool relative)
+ }
+ 
+ #if CV_AVX2 && CV_FP16
+-static inline __m256 loadEightWarpHalf(const hfloat* src)
+-{
+-    return _mm256_cvtph_ps(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src)));
+-}
+-
+-static inline void storeThreeWarpHalf(const v_float32x4& rgb, hfloat* dst)
+-{
+-    hfloat packed[4];
+-    v_pack_store(packed, rgb);
+-    std::memcpy(dst, packed, 3*sizeof(hfloat));
+-}
+-
+ static inline void sumPackedLanczosRGB(const float* values, hfloat* dst)
+ {
+     float red = values[0], green = values[1], blue = values[2];
+@@ -9164,20 +9261,7 @@ static inline void cubicRGBBlockWeights(__m256 fraction, float coefficient, floa
+ {
+     v_float32 w0, w1, w2, w3;
+     bicubicWeights(v_float32(fraction), coefficient, w0, w1, w2, w3);
+-    __m128 lower0 = _mm256_castps256_ps128(w0.val), lower1 = _mm256_castps256_ps128(w1.val);
+-    __m128 lower2 = _mm256_castps256_ps128(w2.val), lower3 = _mm256_castps256_ps128(w3.val);
+-    __m128 upper0 = _mm256_extractf128_ps(w0.val, 1), upper1 = _mm256_extractf128_ps(w1.val, 1);
+-    __m128 upper2 = _mm256_extractf128_ps(w2.val, 1), upper3 = _mm256_extractf128_ps(w3.val, 1);
+-    _MM_TRANSPOSE4_PS(lower0, lower1, lower2, lower3);
+-    _MM_TRANSPOSE4_PS(upper0, upper1, upper2, upper3);
+-    _mm_storeu_ps(weights[0], lower0);
+-    _mm_storeu_ps(weights[1], lower1);
+-    _mm_storeu_ps(weights[2], lower2);
+-    _mm_storeu_ps(weights[3], lower3);
+-    _mm_storeu_ps(weights[4], upper0);
+-    _mm_storeu_ps(weights[5], upper1);
+-    _mm_storeu_ps(weights[6], upper2);
+-    _mm_storeu_ps(weights[7], upper3);
++    storeWarpWeights8(w0.val, w1.val, w2.val, w3.val, weights);
+ }
+ 
+ static void bicubicWarpHalfRGBBlocks(const float* x, const float* y, int len,
+@@ -9196,11 +9280,7 @@ static void bicubicWarpHalfRGBBlocks(const float* x, const float* y, int len,
+     for (; i + block <= len; i += block, dst += 3*block)
+     {
+         const __m256 sx = _mm256_loadu_ps(x + i), sy = _mm256_loadu_ps(y + i);
+-        const __m256 validX = _mm256_and_ps(_mm256_cmp_ps(sx, minimum, _CMP_GE_OQ),
+-                                            _mm256_cmp_ps(sx, maxX, _CMP_LT_OQ));
+-        const __m256 validY = _mm256_and_ps(_mm256_cmp_ps(sy, minimum, _CMP_GE_OQ),
+-                                            _mm256_cmp_ps(sy, maxY, _CMP_LT_OQ));
+-        if (_mm256_movemask_ps(_mm256_and_ps(validX, validY)) != 255)
++        if (!fullWarpFootprints8(sx, sy, minimum, maxX, maxY))
+         {
+             bicubicWarpChannels<hfloat>(x + i, y + i, block, source, step, size, dst, params,
+                                        borderType, borderValue, channels);
 diff --git a/modules/imgproc/test/test_imgwarp.cpp b/modules/imgproc/test/test_imgwarp.cpp
-index f14bfba42..0a667e90c 100644
+index 0a667e90c..db772cf64 100644
 --- a/modules/imgproc/test/test_imgwarp.cpp
 +++ b/modules/imgproc/test/test_imgwarp.cpp
-@@ -1640,6 +1640,55 @@ INSTANTIATE_TEST_CASE_P(ImgProc, Imgproc_RemapHalfRGB,
+@@ -1616,16 +1616,18 @@ TEST_P(Imgproc_RemapHalfRGB, tight_footprint)
+         pixels[i] = hfloat(float(4*(i/3) + i%3)/256.f);
+     const Mat src(side, side, CV_16FC3, pixels);
+     const int center = side/2 - 1;
+-    const Mat mapX(1, 1, CV_32F, Scalar(center + 0.25)), mapY(1, 1, CV_32F, Scalar(center + 0.5));
++    // Eight destinations also exercise the wide-load guard on this two-pixel RGB row.
++    const int width = interpolation == INTER_LINEAR ? 8 : 1;
++    const Mat mapX(1, width, CV_32F, Scalar(center + 0.25)), mapY(1, width, CV_32F, Scalar(center + 0.5));
+     Mat map1 = mapX, map2 = mapY;
+     if (mapType != CV_32FC1)
+         convertMaps(mapX, mapY, map1, map2, mapType);
+ 
+-    hfloat output[4] = {hfloat(0.f), hfloat(0.f), hfloat(0.f), hfloat(23.f)};
+-    Mat dst(1, 1, CV_16FC3, output);
++    std::vector<hfloat> output(3*width + 1, hfloat(23.f));
++    Mat dst(1, width, CV_16FC3, output.data());
+     remap(src, dst, map1, map2, interpolation);
+-    ASSERT_EQ(dst.data, reinterpret_cast<uchar*>(output));
+-    EXPECT_EQ(23.f, float(output[3]));
++    ASSERT_EQ(dst.data, reinterpret_cast<uchar*>(output.data()));
++    EXPECT_EQ(23.f, float(output.back()));
+ 
+     Mat wide, expected, rounded, actual;
+     src.convertTo(wide, CV_32F);
+@@ -1640,12 +1642,13 @@ INSTANTIATE_TEST_CASE_P(ImgProc, Imgproc_RemapHalfRGB,
                          testing::Combine(testing::Values(INTER_LINEAR, INTER_CUBIC, INTER_LANCZOS4),
                                           testing::Values(CV_32FC1, CV_32FC2, CV_16SC2)));
  
-+typedef testing::TestWithParam<tuple<int, int>> Imgproc_RemapCubicHalfRGB;
-+
-+TEST_P(Imgproc_RemapCubicHalfRGB, mixed_footprints_and_tail)
-+{
-+    const int mapType = get<0>(GetParam());
-+    const int border = get<1>(GetParam());
-+    Mat wider(13, 18, CV_32FC3), halfStorage;
-+    theRNG().fill(wider, RNG::UNIFORM, -1.f, 1.f);
-+    wider.convertTo(halfStorage, CV_16F);
-+    const Mat half = halfStorage(Rect(1, 2, 16, 10));
-+    Mat wide;
-+    half.convertTo(wide, CV_32F);
-+
-+    const int width = 19;
-+    Mat mapX(1, width, CV_32F), mapY(1, width, CV_32F, Scalar(2.75));
-+    for (int x = 0; x < width; ++x)
-+        mapX.at<float>(x) = 1.25f + x%9;
-+    // Complete block, mixed block, then a three-pixel tail.
-+    mapX.at<float>(8) = -0.75f;
-+    mapX.at<float>(13) = mapType == CV_16SC2 ? -4.f : std::numeric_limits<float>::quiet_NaN();
-+    mapX.at<float>(18) = 15.25f;
-+    Mat map1 = mapX, map2 = mapY;
-+    if (mapType != CV_32FC1)
-+        convertMaps(mapX, mapY, map1, map2, mapType);
-+
-+    Mat expected(1, width, CV_32FC3), result;
-+    theRNG().fill(expected, RNG::UNIFORM, -1.f, 1.f);
-+    expected.convertTo(result, CV_16F);
-+    result.convertTo(expected, CV_32F);
-+    const Scalar fill(0.25, -0.5, 0.75);
-+    remap(half, result, map1, map2, INTER_CUBIC, border, fill);
-+    for (int x = 0; x < width; ++x)
-+    {
-+        const Rect one(x, 0, 1, 1);
-+        Mat dst = expected(one);
-+        remap(wide, dst, map1(one), map2.empty() ? Mat() : map2(one), INTER_CUBIC, border, fill);
-+    }
-+
-+    Mat rounded, observed;
-+    expected.convertTo(rounded, CV_16F);
-+    rounded.convertTo(expected, CV_32F);
-+    result.convertTo(observed, CV_32F);
-+    EXPECT_LE(cvtest::norm(expected, observed, NORM_INF), 1./1024.);
-+}
-+
-+INSTANTIATE_TEST_CASE_P(ImgProc, Imgproc_RemapCubicHalfRGB,
-+                        testing::Combine(testing::Values(CV_32FC1, CV_32FC2, CV_16SC2),
-+                                         testing::Values(BORDER_CONSTANT, BORDER_TRANSPARENT)));
-+
- TEST(Imgproc_Remap, bilinear_half_rgb_fixed_relative_offsets)
+-typedef testing::TestWithParam<tuple<int, int>> Imgproc_RemapCubicHalfRGB;
++typedef testing::TestWithParam<tuple<int, int, int>> Imgproc_RemapHalfRGBBlocks;
+ 
+-TEST_P(Imgproc_RemapCubicHalfRGB, mixed_footprints_and_tail)
++TEST_P(Imgproc_RemapHalfRGBBlocks, mixed_footprints_and_tail)
  {
-     Mat wide(31, 275, CV_32FC3), half;
+-    const int mapType = get<0>(GetParam());
+-    const int border = get<1>(GetParam());
++    const int interpolation = get<0>(GetParam());
++    const int mapType = get<1>(GetParam());
++    const int border = get<2>(GetParam());
+     Mat wider(13, 18, CV_32FC3), halfStorage;
+     theRNG().fill(wider, RNG::UNIFORM, -1.f, 1.f);
+     wider.convertTo(halfStorage, CV_16F);
+@@ -1653,14 +1656,15 @@ TEST_P(Imgproc_RemapCubicHalfRGB, mixed_footprints_and_tail)
+     Mat wide;
+     half.convertTo(wide, CV_32F);
+ 
+-    const int width = 19;
++    const int width = 27;
+     Mat mapX(1, width, CV_32F), mapY(1, width, CV_32F, Scalar(2.75));
+     for (int x = 0; x < width; ++x)
+         mapX.at<float>(x) = 1.25f + x%9;
+-    // Complete block, mixed block, then a three-pixel tail.
++    // Complete block, mixed block, right-edge block, then a three-pixel tail.
+     mapX.at<float>(8) = -0.75f;
+     mapX.at<float>(13) = mapType == CV_16SC2 ? -4.f : std::numeric_limits<float>::quiet_NaN();
+-    mapX.at<float>(18) = 15.25f;
++    mapX.at<float>(21) = 14.25f;
++    mapX.at<float>(26) = 15.25f;
+     Mat map1 = mapX, map2 = mapY;
+     if (mapType != CV_32FC1)
+         convertMaps(mapX, mapY, map1, map2, mapType);
+@@ -1668,14 +1672,16 @@ TEST_P(Imgproc_RemapCubicHalfRGB, mixed_footprints_and_tail)
+     Mat expected(1, width, CV_32FC3), result;
+     theRNG().fill(expected, RNG::UNIFORM, -1.f, 1.f);
+     expected.convertTo(result, CV_16F);
+-    result.convertTo(expected, CV_32F);
++    // The legacy FP32 transparent linear path has different partial-border behavior.
++    const Mat& referenceSource = interpolation == INTER_LINEAR && border == BORDER_TRANSPARENT ? half : wide;
++    result.convertTo(expected, referenceSource.depth());
+     const Scalar fill(0.25, -0.5, 0.75);
+-    remap(half, result, map1, map2, INTER_CUBIC, border, fill);
++    remap(half, result, map1, map2, interpolation, border, fill);
+     for (int x = 0; x < width; ++x)
+     {
+         const Rect one(x, 0, 1, 1);
+         Mat dst = expected(one);
+-        remap(wide, dst, map1(one), map2.empty() ? Mat() : map2(one), INTER_CUBIC, border, fill);
++        remap(referenceSource, dst, map1(one), map2.empty() ? Mat() : map2(one), interpolation, border, fill);
+     }
+ 
+     Mat rounded, observed;
+@@ -1685,8 +1691,9 @@ TEST_P(Imgproc_RemapCubicHalfRGB, mixed_footprints_and_tail)
+     EXPECT_LE(cvtest::norm(expected, observed, NORM_INF), 1./1024.);
+ }
+ 
+-INSTANTIATE_TEST_CASE_P(ImgProc, Imgproc_RemapCubicHalfRGB,
+-                        testing::Combine(testing::Values(CV_32FC1, CV_32FC2, CV_16SC2),
++INSTANTIATE_TEST_CASE_P(ImgProc, Imgproc_RemapHalfRGBBlocks,
++                        testing::Combine(testing::Values(INTER_LINEAR, INTER_CUBIC),
++                                         testing::Values(CV_32FC1, CV_32FC2, CV_16SC2),
+                                          testing::Values(BORDER_CONSTANT, BORDER_TRANSPARENT)));
+ 
+ TEST(Imgproc_Remap, bilinear_half_rgb_fixed_relative_offsets)
